@@ -1,0 +1,606 @@
+CODE SNIPPET 1: HYPERCHAOTIC KEY GENERATION
+from google.colab import drive
+drive.mount('/content/drive')
+import os
+import cv2
+import math
+import time
+import random
+import numpy as np
+import matplotlib.pyplot as plt
+dataset_path = "/content/drive/MyDrive/QFL_Project/casting_data"
+def load_first_grayscale_image(dataset_path):
+image_files = []
+for root, dirs, files in os.walk(dataset_path):
+for f in files:
+if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff')):
+image_files.append(os.path.join(root, f))
+if len(image_files) == 0:
+raise FileNotFoundError("No image found in dataset path.")
+image_files.sort()
+img_path = image_files[0]
+img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+if img is None:
+raise ValueError("Image could not be loaded.")
+return img, img_path
+P, img_path = load_first_grayscale_image(dataset_path)
+ROW, COL = P.shape53
+print("Loaded image:", img_path)
+print("Shape:", P.shape)
+plt.figure(figsize=(5,5))
+plt.imshow(P, cmap='gray')
+plt.title("Original Image")
+plt.axis("off")
+plt.show()
+def hyperchaotic_key_generation(key_length=156, discard=1000):
+x, y, z, w = 0.11, 0.21, 0.31, 0.41
+a, b, c, d = 36.0, 3.0, 28.0, 16.0
+dt = 0.001
+total = key_length + discard
+X = np.zeros(total)
+Y = np.zeros(total)
+Z = np.zeros(total)
+W = np.zeros(total)
+X[0], Y[0], Z[0], W[0] = x, y, z, w
+for i in range(total - 1):
+dx = a * (Y[i] - X[i]) + W[i]
+dy = c * X[i] - Y[i] - X[i] * Z[i]
+dz = X[i] * Y[i] - b * Z[i]
+dw = -d * X[i]
+X[i + 1] = X[i] + dt * dx
+Y[i + 1] = Y[i] + dt * dy
+Z[i + 1] = Z[i] + dt * dz
+W[i + 1] = W[i] + dt * dw
+seq = np.concatenate([X[discard:], Y[discard:], Z[discard:], W[discard:]])
+seq = np.abs(seq)
+seq = (seq - np.min(seq)) / (np.max(seq) - np.min(seq) + 1e-12)54
+bits = (seq > 0.5).astype(np.uint8)
+return bits[:key_length]
+secret_key = hyperchaotic_key_generation()
+def perturbed_logistic(x, r):
+if abs(x) < 1e-15:
+x += 1e-15
+return abs(r * (1 - r / x)) % 1.0
+def generate_CPLM(secret_key, total_points, x0, y0, z0, rX, rY, rZ):
+key_bits = np.array(secret_key, dtype=np.int64).flatten()
+prefix_sum = np.cumsum(key_bits)
+NX = x0
+NY = y0
+NZ = z0
+for i in range(1, len(key_bits) + 1):
+kp = prefix_sum[i - 1] / 2.0
+NX = (NX + kp) % 1
+NY = (NY + kp) % 1
+NZ = (NZ + kp) % 1
+X = [NX, perturbed_logistic(NX, rX), perturbed_logistic(perturbed_logistic(NX, rX), rX)]
+Y = [NY, perturbed_logistic(NY, rY), perturbed_logistic(perturbed_logistic(NY, rY), rY)]
+Z = [NZ, perturbed_logistic(NZ, rZ), perturbed_logistic(perturbed_logistic(NZ, rZ), rZ)]
+D = []
+cycles = int(np.ceil(total_points / 3))
+for _ in range(cycles):
+NX_new = (X[-3] + Z[-1]) % 1
+X_new = perturbed_logistic(NX_new, rX)
+X.append(X_new)
+D.append(X_new)
+if len(D) >= total_points:
+break
+NY_new = (Y[-3] + X[-1]) % 155
+Y_new = perturbed_logistic(NY_new, rY)
+Y.append(Y_new)
+D.append(Y_new)
+if len(D) >= total_points:
+break
+NZ_new = (Z[-3] + Y[-1]) % 1
+Z_new = perturbed_logistic(NZ_new, rZ)
+Z.append(Z_new)
+D.append(Z_new)
+if len(D) >= total_points:
+break
+return np.array(D[:total_points], dtype=np.float64)
+def generate_ABC(D, ROW):
+A = ((D * (2 ** 13)).astype(np.int64)) % 8
+B = ((D * (2 ** 14)).astype(np.int64)) % ROW + 1
+C = ((D * (2 ** 15)).astype(np.int64)) % 256
+return A, B, C.astype(np.uint8)
+def generate_permutation_matrix(A, B, COL, ROW):
+PM = np.zeros((COL, ROW, 2), dtype=np.int64)
+sample = np.zeros((COL, ROW), dtype=np.int64)
+directions = {
+0: (-1, 0),
+1: (-1, 1),
+2: (0, 1),
+3: (1, 1),
+4: (1, 0),
+5: (1, -1),
+6: (0, -1),
+7: (-1, -1),
+}
+current_i = (COL + 1) // 2
+current_j = (ROW + 1) // 2
+visited_positions = []
+sample[current_i - 1, current_j - 1] = -156
+visited_positions.append((current_i, current_j))
+total = COL * ROW
+for t in range(1, min(len(A), total) + 1):
+d = int(A[t - 1])
+move_count = int(B[t - 1])
+di, dj = directions[d]
+ni = current_i
+nj = current_j
+for _ in range(move_count):
+ti = ((ni - 1 + di) % COL) + 1
+tj = ((nj - 1 + dj) % ROW) + 1
+if sample[ti - 1, tj - 1] == -1:
+break
+ni = ti
+nj = tj
+if sample[ni - 1, nj - 1] != -1:
+sample[ni - 1, nj - 1] = -1
+visited_positions.append((ni, nj))
+current_i = ni
+current_j = nj
+if len(visited_positions) >= total:
+break
+for i in range(1, COL + 1):
+for j in range(1, ROW + 1):
+if sample[i - 1, j - 1] != -1:
+sample[i - 1, j - 1] = -1
+visited_positions.append((i, j))
+k = 0
+for i in range(1, COL + 1):57
+for j in range(1, ROW + 1):
+PM[i - 1, j - 1, 0] = visited_positions[k][0]
+PM[i - 1, j - 1, 1] = visited_positions[k][1]
+k += 1
+return PM
+def inverse_permutation_matrix(PM):
+COL, ROW, _ = PM.shape
+IPM = np.zeros_like(PM)
+for i in range(1, COL + 1):
+for j in range(1, ROW + 1):
+pi = PM[i - 1, j - 1, 0]
+pj = PM[i - 1, j - 1, 1]
+IPM[pi - 1, pj - 1, 0] = i
+IPM[pi - 1, pj - 1, 1] = j
+return IPM
+def flat_index(i, j, ROW):
+return (i - 1) * ROW + (j - 1)
+def paper_sum_enc(PD_flat, C_flat, k):
+s = 0
+start = max(0, k - 8)
+for n in range(start, k + 1):
+s += int(PD_flat[n]) + int(C_flat[n])
+return s % 256
+def paper_sum_dec(PD_flat, C_flat, k):
+s = 0
+start = max(0, k - 8)
+for n in range(start, k):
+s += int(PD_flat[n]) + int(C_flat[n])
+return s
+def encrypt_image(P, PM, C):
+P = np.asarray(P, dtype=np.uint8)58
+if P.ndim == 2:
+P = P[:, :, None]
+COL, ROW, CA = P.shape
+PC_all = np.zeros_like(P, dtype=np.uint8)
+total = ROW * COL * CA
+D_dummy = np.zeros(total)
+for Channel in range(1, CA + 1):
+PD = P[:, :, Channel - 1].copy()
+PD_flat = PD.flatten()
+C_flat = np.asarray(C).flatten()[:COL * ROW]
+mid_i = (COL + 1) // 2
+mid_j = (ROW + 1) // 2
+for i in range(1, COL + 1):
+for j in range(1, ROW + 1):
+k1 = flat_index(i, j, ROW)
+PD_flat[k1] = np.uint8(int(PD_flat[k1]) ^ int(C_flat[k1]))
+PD_flat[k1] = np.uint8(paper_sum_enc(PD_flat, C_flat, k1))
+si = COL - i + 1
+sj = ROW - j + 1
+k2 = flat_index(si, sj, ROW)
+PD_flat[k2] = np.uint8(int(PD_flat[k2]) ^ int(C_flat[k2]))
+PD_flat[k2] = np.uint8(paper_sum_enc(PD_flat, C_flat, k2))
+if i >= mid_i and j >= mid_j:
+pmi = PM[i - 1, j - 1, 0]
+pmj = PM[i - 1, j - 1, 1]
+src1 = flat_index(pmi, pmj, ROW)
+PC_all[i - 1, j - 1, Channel - 1] = PD_flat[src1]
+pmi2 = PM[si - 1, sj - 1, 0]
+pmj2 = PM[si - 1, sj - 1, 1]
+src2 = flat_index(pmi2, pmj2, ROW)
+PC_all[si - 1, sj - 1, Channel - 1] = PD_flat[src2]
+PC_all[:, :, Channel - 1] = PC_all[:, :, Channel - 1]59
+if CA == 1:
+return PC_all[:, :, 0]
+return PC_all
+def decrypt_image(PC, PM, C):
+PC = np.asarray(PC, dtype=np.uint8)
+if PC.ndim == 2:
+PC = PC[:, :, None]
+COL, ROW, CA = PC.shape
+recovered = np.zeros_like(PC, dtype=np.uint8)
+IPM = inverse_permutation_matrix(PM)
+C_flat = np.asarray(C).flatten()[:COL * ROW]
+for Channel in range(CA, 0, -1):
+PD = np.zeros((COL, ROW), dtype=np.uint8)
+PD_flat = PD.flatten()
+for i in range(COL, 0, -1):
+for j in range(ROW, 0, -1):
+ipmi = IPM[i - 1, j - 1, 0]
+ipmj = IPM[i - 1, j - 1, 1]
+PD[i - 1, j - 1] = PC[ipmi - 1, ipmj - 1, Channel - 1]
+PD_flat = PD.flatten()
+P_flat = PD_flat.copy()
+for i in range(COL, 0, -1):
+for j in range(ROW, 0, -1):
+k1 = flat_index(i, j, ROW)
+temp1 = (paper_sum_dec(P_flat, C_flat, k1) + int(C_flat[k1]) - int(PD_flat[k1])) % 256
+P_flat[k1] = np.uint8(temp1 ^ int(C_flat[k1]))
+si = COL - i + 1
+sj = ROW - j + 1
+k2 = flat_index(si, sj, ROW)
+temp2 = (paper_sum_dec(P_flat, C_flat, k2) + int(C_flat[k2]) - int(PD_flat[k2])) % 256
+P_flat[k2] = np.uint8(temp2 ^ int(C_flat[k2]))
+recovered[:, :, Channel - 1] = P_flat.reshape(COL, ROW)60
+if CA == 1:
+return recovered[:, :, 0]
+return recovered
+img_path = "/content/drive/MyDrive/casting_data/train/ok_front/cast_ok_0_1.jpeg"
+P = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+secret_key = hyperchaotic_key_generation(156)
+x0, y0, z0, rX, rY, rZ = best_params
+COL, ROW = P.shape
+CA = 1
+total_points = ROW * COL * CA
+D = generate_CPLM(secret_key, total_points, x0, y0, z0, rX, rY, rZ)
+A, B, C = generate_ABC(D, ROW)
+PM = generate_permutation_matrix(A, B, COL, ROW)
+cipher = encrypt_image(P, PM, C)
+recovered = decrypt_image(cipher, PM, C)
+def calculate_entropy(image):
+hist = np.histogram(image.flatten(), bins=256, range=[0,256])[0]
+prob = hist / np.sum(hist)
+prob = prob[prob > 0]
+entropy = -np.sum(prob * np.log2(prob))
+return entropy
+def calculate_correlation(image):
+img = image.astype(np.float64)
+x = img[:, :-1].flatten()
+y = img[:, 1:].flatten()
+mean_x = np.mean(x)
+mean_y = np.mean(y)
+num = np.sum((x - mean_x) * (y - mean_y))
+den = np.sqrt(np.sum((x - mean_x)*2) * np.sum((y - mean_y)*2)) + 1e-12
+return num / den61
+def calculate_npcr(img1, img2):
+diff = (img1 != img2).astype(np.uint8)
+npcr = np.sum(diff) / diff.size * 100
+return npcr
+def calculate_uaci(img1, img2):
+img1 = img1.astype(np.float64)
+img2 = img2.astype(np.float64)
+uaci = np.mean(np.abs(img1 - img2) / 255.0) * 100
+return uaci
+def evaluate_candidate(params, image, key_bits):
+x0, y0, z0, rX, rY, rZ = params
+total = image.size
+try:
+D = generate_CPLM(key_bits, total, x0, y0, z0, rX, rY, rZ)
+A, B, C = generate_ABC(D, image.shape[0])
+PM = generate_permutation_matrix(A, B, image.shape[0], image.shape[1])
+cipher = encrypt_image(image, PM, C)
+recovered = decrypt_image(cipher, PM, C)
+if not np.array_equal(image, recovered):
+return -1e9, None
+entropy = calculate_entropy(cipher)
+corr = abs(calculate_correlation(cipher))
+modified = image.copy()
+modified[0, 0] = (int(modified[0, 0]) + 1) % 256
+cipher2 = encrypt_image(modified, PM, C)
+npcr = calculate_npcr(cipher, cipher2)
+uaci = calculate_uaci(cipher, cipher2)
+fitness = (62
+0.30 * (entropy / 8.0) +
+0.25 * (1 - min(corr, 1.0)) +
+0.25 * (npcr / 100.0) +
+0.20 * (1 - abs(uaci - 33.0) / 33.0)
+)
+details = {
+"entropy": entropy,
+"correlation": corr,
+"npcr": npcr,
+"uaci": uaci,
+"cipher": cipher,
+"recovered": recovered,
+"PM": PM,
+"C": C
+}
+return fitness, details
+except Exception:
+return -1e9, None
+def random_candidate():
+return np.array([
+np.random.uniform(0.1, 0.9),
+np.random.uniform(0.1, 0.9),
+np.random.uniform(0.1, 0.9),
+np.random.uniform(0.5, 3.9),
+np.random.uniform(0.5, 3.9),
+np.random.uniform(0.5, 3.9)
+], dtype=np.float64)
+def clip_candidate(c):
+c[0:3] = np.clip(c[0:3], 0.1, 0.9)
+c[3:6] = np.clip(c[3:6], 0.5, 3.9)
+return c
+def puma_optimize(image, key_bits, pop_size=8, iterations=20):
+population = [random_candidate() for _ in range(pop_size)]63
+fitnesses = []
+details_list = []
+for cand in population:
+fit, det = evaluate_candidate(cand, image, key_bits)
+fitnesses.append(fit)
+details_list.append(det)
+best_idx = int(np.argmax(fitnesses))
+best_candidate = population[best_idx].copy()
+best_fitness = fitnesses[best_idx]
+best_details = details_list[best_idx]
+history = [best_fitness]
+for it in range(iterations):
+new_population = []
+for i in range(pop_size):
+curr = population[i].copy()
+r1 = np.random.rand(6)
+r2 = np.random.rand(6)
+candidate = curr + 0.5 * r1 * (best_candidate - curr) + 0.2 * r2 * np.random.randn(6)
+candidate = clip_candidate(candidate)
+new_population.append(candidate)
+new_fitnesses = []
+new_details_list = []
+for cand in new_population:
+fit, det = evaluate_candidate(cand, image, key_bits)
+new_fitnesses.append(fit)
+new_details_list.append(det)
+for i in range(pop_size):
+if new_fitnesses[i] > fitnesses[i]:
+population[i] = new_population[i]64
+fitnesses[i] = new_fitnesses[i]
+fitnesses[i] = new_fitnesses[i]
+details_list[i] = new_details_list[i]
+best_idx = int(np.argmax(fitnesses))
+if fitnesses[best_idx] > best_fitness:
+best_fitness = fitnesses[best_idx]
+best_candidate = population[best_idx].copy()
+best_details = details_list[best_idx]
+history.append(best_fitness)
+print(f"Iteration {it+1}/{iterations} | Best Fitness = {best_fitness:.6f}")
+return best_candidate, best_fitness, best_details, history
+start_time = time.time()
+best_params, best_fitness, best_details, history = puma_optimize(
+image=P,
+key_bits=secret_key,
+pop_size=8,
+iterations=20
+)
+end_time = time.time()
+print("\nBest Parameters:")
+print("x0, y0, z0, rX, rY, rZ =", best_params)
+print("Best Fitness:", best_fitness)
+print("Execution Time:", end_time - start_time, "seconds")
+cipher = best_details["cipher"]
+recovered = best_details["recovered"]
+print("\nFinal Metrics:")
+print("Entropy:", best_details["entropy"])
+print("Correlation:", best_details["correlation"])
+print("NPCR:", best_details["npcr"])
+print("UACI:", best_details["uaci"])
+print("Decryption Correct:", np.array_equal(P, recovered))65
+plt.figure(figsize=(15,5))
+plt.subplot(1,3,1)
+plt.imshow(P, cmap='gray')
+plt.title("Original")
+plt.axis("off")
+plt.subplot(1,3,2)
+plt.imshow(cipher, cmap='gray')
+plt.title("Encrypted")
+plt.axis("off")
+plt.subplot(1,3,3)
+plt.imshow(recovered, cmap='gray')
+plt.title("Decrypted")
+plt.axis("off")
+plt.show()
+plt.figure(figsize=(6,4))
+plt.plot(history)
+plt.title("PUMA Fitness Curve")
+plt.xlabel("Iteration")
+plt.ylabel("Best Fitness")
+plt.grid(True)
+plt.show()
+import numpy as np
+import matplotlib.pyplot as plt
+import time
+def plot_histogram_analysis(original, encrypted):
+plt.figure(figsize=(14, 5))
+plt.subplot(1, 2, 1)
+plt.hist(original.flatten(), bins=256, range=(0, 256))
+plt.title("Histogram of Original Image")
+plt.xlabel("Pixel Value")
+plt.ylabel("Frequency")
+plt.subplot(1, 2, 2)66
+plt.hist(encrypted.flatten(), bins=256, range=(0, 256))
+plt.title("Histogram of Encrypted Image")
+plt.xlabel("Pixel Value")
+plt.ylabel("Frequency")
+plt.tight_layout()
+plt.show()
+def adjacent_correlation(image, direction='horizontal'):
+img = image.astype(np.float64)
+if direction == 'horizontal':
+x = img[:, :-1].flatten()
+y = img[:, 1:].flatten()
+elif direction == 'vertical':
+x = img[:-1, :].flatten()
+y = img[1:, :].flatten()
+elif direction == 'diagonal':
+x = img[:-1, :-1].flatten()
+y = img[1:, 1:].flatten()
+mean_x = np.mean(x)
+mean_y = np.mean(y)
+num = np.sum((x - mean_x) * (y - mean_y))
+den = np.sqrt(np.sum((x - mean_x)*2) * np.sum((y - mean_y)*2)) + 1e-12
+return num / den
+def print_correlation_results(original, encrypted):
+print("\n===== CORRELATION ANALYSIS =====")
+print("\nOriginal Image:")
+print(f"Horizontal : {adjacent_correlation(original, 'horizontal'):.6f}")
+print(f"Vertical : {adjacent_correlation(original, 'vertical'):.6f}")
+print(f"Diagonal : {adjacent_correlation(original, 'diagonal'):.6f}")
+print("\nEncrypted Image:")67
+print(f"Horizontal : {adjacent_correlation(encrypted, 'horizontal'):.6f}")
+print(f"Vertical : {adjacent_correlation(encrypted, 'vertical'):.6f}")
+print(f"Diagonal : {adjacent_correlation(encrypted, 'diagonal'):.6f}")
+def plot_correlation_scatter(image, title, sample=2000):
+img = image.astype(np.float64)
+directions = {
+"Horizontal": (img[:, :-1].flatten(), img[:, 1:].flatten()),
+"Vertical": (img[:-1, :].flatten(), img[1:, :].flatten()),
+"Diagonal": (img[:-1, :-1].flatten(), img[1:, 1:].flatten())
+}
+plt.figure(figsize=(15, 4))
+for i, (name, (x, y)) in enumerate(directions.items(), 1):
+if len(x) > sample:
+idx = np.random.choice(len(x), sample, replace=False)
+x = x[idx]
+y = y[idx]
+plt.subplot(1, 3, i)
+plt.scatter(x, y, s=5)
+plt.title(f"{title} - {name}")
+plt.xlabel("Pixel")
+plt.ylabel("Adjacent Pixel")
+plt.xlim(0, 255)
+plt.ylim(0, 255)
+plt.tight_layout()
+plt.show()
+def simple_speed_analysis(P, PM, C):
+start_enc = time.perf_counter()
+cipher = encrypt_image(P, PM, C)
+end_enc = time.perf_counter()
+start_dec = time.perf_counter()
+recovered = decrypt_image(cipher, PM, C)
+end_dec = time.perf_counter()
+print("\n===== SPEED ANALYSIS =====")
+print(f"Encryption Time : {end_enc - start_enc:.6f} seconds")68
+print(f"Decryption Time : {end_dec - start_dec:.6f} seconds")
+return cipher, recovered
+cipher, recovered = simple_speed_analysis(P, PM, C)
+plot_histogram_analysis(P, cipher)
+print_correlation_results(P, cipher)
+plot_correlation_scatter(P, "Original Image")
+plot_correlation_scatter(cipher, "Encrypted Image")
+import numpy as np
+import matplotlib.pyplot as plt
+x0, y0, z0, rX, rY, rZ = best_params
+total = P.size
+D = generate_CPLM(secret_key, total, x0, y0, z0, rX, rY, rZ)
+A, B, C = generate_ABC(D, P.shape[0])
+PM = generate_permutation_matrix(A, B, P.shape[0], P.shape[1])
+h, w = P.shape
+black_plain = np.zeros((h, w), dtype=np.uint8)
+white_plain = np.full((h, w), 255, dtype=np.uint8)
+black_cipher = encrypt_image(black_plain, PM, C)
+white_cipher = encrypt_image(white_plain, PM, C)
+plt.figure(figsize=(10, 8))
+plt.subplot(2, 2, 1)
+plt.imshow(black_plain, cmap='gray', vmin=0, vmax=255)
+plt.title("(a) Black plain image")
+plt.axis("off")
+plt.subplot(2, 2, 2)
+plt.imshow(black_cipher, cmap='gray', vmin=0, vmax=255)
+plt.title("(b) Black cipher image")
+plt.axis("off")
+plt.subplot(2, 2, 3)
+plt.imshow(white_plain, cmap='gray', vmin=0, vmax=255)
+plt.title("(c) White plain image")69
+plt.axis("off")
+plt.subplot(2, 2, 4)
+plt.imshow(white_cipher, cmap='gray', vmin=0, vmax=255)
+plt.title("(d) White cipher image")
+plt.axis("off")
+plt.tight_layout()
+plt.show()
+plt.figure(figsize=(12, 4))
+plt.subplot(1, 2, 1)
+plt.hist(black_cipher.flatten(), bins=256, range=(0, 256))
+plt.title("Histogram of Black Cipher Image")
+plt.xlabel("Pixel Value")
+plt.ylabel("Frequency")
+plt.subplot(1, 2, 2)
+plt.hist(white_cipher.flatten(), bins=256, range=(0, 256))
+plt.title("Histogram of White Cipher Image")
+plt.xlabel("Pixel Value")
+plt.ylabel("Frequency")
+plt.tight_layout()
+plt.show()
+import numpy as np
+import matplotlib.pyplot as plt
+def npcr(img1, img2):
+assert img1.shape == img2.shape
+diff = (img1 != img2).astype(np.uint8)
+return np.sum(diff) * 100.0 / diff.size
+def uaci(img1, img2):
+assert img1.shape == img2.shape
+return np.mean(np.abs(img1.astype(np.float64) - img2.astype(np.float64)) / 255.0) * 100.0
+x0, y0, z0, rX, rY, rZ = best_params
+h, w = P.shape70
+total = P.size
+D1 = generate_CPLM(secret_key, total, x0, y0, z0, rX, rY, rZ)
+A1, B1, C1 = generate_ABC(D1, h)
+PM1 = generate_permutation_matrix(A1, B1, h, w)
+cipher1 = encrypt_image(P, PM1, C1)
+x0_2 = x0 + 1e-14
+D2 = generate_CPLM(secret_key, total, x0_2, y0, z0, rX, rY, rZ)
+A2, B2, C2 = generate_ABC(D2, h)
+PM2 = generate_permutation_matrix(A2, B2, h, w)
+cipher2 = encrypt_image(P, PM2, C2)
+npcr_val = npcr(cipher1, cipher2)
+uaci_val = uaci(cipher1, cipher2)
+print("===== KEY SENSITIVITY ANALYSIS =====")
+print(f"Original x0 : {x0}")
+print(f"Modified x0 : {x0_2}")
+print(f"NPCR (%) : {npcr_val:.6f}")
+print(f"UACI (%) : {uaci_val:.6f}")
+plt.figure(figsize=(12, 4))
+plt.subplot(1, 3, 1)
+plt.imshow(cipher1, cmap='gray', vmin=0, vmax=255)
+plt.title("Cipher with Original Key")
+plt.axis("off")
+plt.subplot(1, 3, 2)
+plt.imshow(cipher2, cmap='gray', vmin=0, vmax=255)
+plt.title("Cipher with Slightly Changed Key")
+plt.axis("off")
+plt.subplot(1, 3, 3)
+plt.imshow(np.abs(cipher1.astype(np.int16) - cipher2.astype(np.int16)), cmap='gray')
+plt.title("Difference Image")
+plt.axis("off")
+plt.tight_layout()71
+plt.show()
+import matplotlib.pyplot as plt
+import numpy as np
+diff_img = np.abs(cipher1.astype(np.int16) - cipher2.astype(np.int16)).astype(np.uint8)
+plt.figure(figsize=(15, 4))
+plt.subplot(1, 3, 1)
+plt.hist(cipher1.flatten(), bins=256, range=(0, 256))
+plt.title("Histogram - Cipher (Original Key)")
+plt.xlabel("Pixel Value")
+plt.ylabel("Frequency")
+plt.subplot(1, 3, 2)
+plt.hist(cipher2.flatten(), bins=256, range=(0, 256))
+plt.title("Histogram - Cipher (Changed Key)")
+plt.xlabel("Pixel Value")
+plt.ylabel("Frequency")
+plt.subplot(1, 3, 3)
+plt.hist(diff_img.flatten(), bins=256, range=(0, 256))
+plt.title("Histogram - Difference Image")
+plt.xlabel("Pixel Value")
+plt.ylabel("Frequency")
+plt.tight_layout()
+plt.show()
